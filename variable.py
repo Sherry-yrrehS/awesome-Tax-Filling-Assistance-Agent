@@ -1,40 +1,47 @@
-#全局配置
+# 加载配置并导出变量
+import os
+import yaml
+from pathlib import Path
+
+# ---------- 重定向模型缓存到 D 盘 ----------
+BASE_DIR = Path(__file__).resolve().parent
+CACHE_ROOT = BASE_DIR / "cache"
+CACHE_ROOT.mkdir(exist_ok=True)
+
+os.environ["HF_HOME"] = str(CACHE_ROOT / "huggingface")
+os.environ["TRANSFORMERS_CACHE"] = str(CACHE_ROOT / "transformers")
+os.environ["SENTENCE_TRANSFORMERS_HOME"] = str(CACHE_ROOT / "sentence_transformers")
+os.environ["TORCH_HOME"] = str(CACHE_ROOT / "torch")
+os.environ["JIEBA_CACHE"] = str(CACHE_ROOT / "jieba")
+
+# 获取当前文件所在目录（项目根目录）
+BASE_DIR = Path(__file__).resolve().parent
+
+# 加载配置文件
+with open(BASE_DIR / "config.yaml", "r", encoding="utf-8") as f:
+    config = yaml.safe_load(f)
+
+
 #chat模型
-CHAT_MODEL_NAME="deepseek-v4-flash"
+CHAT_MODEL_NAME=config["chat_model_name"]
 
 #向量模型
-EMBEDDING_MODEL_NAME="text-embedding-3-small"
+EMBEDDING_MODEL_NAME=config["embedding_model_name"]
 
 #Milvus连接地址
-MILVUS_URI="http://localhost:19530"
+MILVUS_URI=config["milvus_uri"]
 
 #数据库名
-DB_NAME="Tax_database"
+DB_NAME=config["db_name"]
 
 #向量数据集名
-COLLECTION_NAME1="Value_added_tax_policy"
+COLLECTION_NAME1=config["collection_name1"]
 
 #向量嵌入维度
-EMBED_DIM=1536
+EMBED_DIM=config["embed_dim"]
 
-#文件路径（Value_added_tax_policy）增值税法全文
-VALUE_ADDED_TAX_POLICY_FILE1="D:\\Study\\星火杯\\7.20-7.25\\分类后文件\\顶层通用征管法规.docx"
-VALUE_ADDED_TAX_POLICY_FILE2="D:\\Study\\星火杯\\7.20-7.25\\分类后文件\\分行业、特殊业务增值税专项政策.docx"
-VALUE_ADDED_TAX_POLICY_FILE3="D:\\Study\\星火杯\\7.20-7.25\\分类后文件\\个体 、定期定额征收管理.docx"
-VALUE_ADDED_TAX_POLICY_FILE4="D:\\Study\\星火杯\\7.20-7.25\\分类后文件\\纳税人资格与发票管理.docx"
-VALUE_ADDED_TAX_POLICY_FILE5="D:\\Study\\星火杯\\7.20-7.25\\分类后文件\\申报比对与异常处理.docx"
-VALUE_ADDED_TAX_POLICY_FILE6="D:\\Study\\星火杯\\7.20-7.25\\分类后文件\\增值税基础法律.docx"
-VALUE_ADDED_TAX_POLICY_FILE7="D:\\Study\\星火杯\\7.20-7.25\\分类后文件\\增值税申报填报规则.docx"
-
-VALUE_ADDED_TAX_POLICY_FILE_WORD=[
-    VALUE_ADDED_TAX_POLICY_FILE1,
-    VALUE_ADDED_TAX_POLICY_FILE2,
-    VALUE_ADDED_TAX_POLICY_FILE3,
-    VALUE_ADDED_TAX_POLICY_FILE4,
-    VALUE_ADDED_TAX_POLICY_FILE5,
-    VALUE_ADDED_TAX_POLICY_FILE6,
-    VALUE_ADDED_TAX_POLICY_FILE7
-]
-
-VALUE_ADDED_TAX_POLICY_FILE_PDF=[
+# 动态生成文件路径列表
+DATA_FOLDER = BASE_DIR / config["data_folder"]
+VALUE_ADDED_TAX_POLICY_FILE_WORD = [
+    str(DATA_FOLDER / fname) for fname in config["file_names"]
 ]

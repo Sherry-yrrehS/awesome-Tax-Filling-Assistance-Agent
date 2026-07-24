@@ -1,77 +1,166 @@
-from variable import VALUE_ADDED_TAX_POLICY_FILE_WORD,VALUE_ADDED_TAX_POLICY_FILE_PDF,COLLECTION_NAME1
-from model import Chat_model,Embedding_model
-from database import client
-from langchain.agents import create_agent
+# main.py - 系统入口（FastAPI + 命令行双模式）
+import sys
+import uuid
+from pathlib import Path
+from typing import Optional
+
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi.responses import JSONResponse
+import uvicorn
 from dotenv import load_dotenv
 
+from logger_config import setup_logger
+from agent_graph import run_agent
+from memory import checkpointer  # 确保记忆初始化
+
+# 加载环境变量
 load_dotenv(override=True)
 
-#创建Agent
-agent=create_agent(
-    model=Chat_model,
-    tools=[],
-    system_prompt=()
+# 配置日志
+logger = setup_logger("main", log_file="main.log")
+
+# ---------------------- FastAPI 应用 ----------------------
+app = FastAPI(
+    title="增值税智能税务助手 API",
+    description="面向中小企业财务人员的增值税政策咨询、发票抵扣判定、申报指导、异常处理",
+    version="1.0.0"
 )
 
-#检索
-# 定义一个具体的函数，实现检索
-def retrieve(query : str,limit : int = 3):
-    # 将此问题向量化
-    query_vector = Embedding_model.embed_query(str(query))
-    # print(query_vector)
-    # 从向量数据库中检索数据
-    results = client.search(
-        collection_name=COLLECTION_NAME1,
-        data=[query_vector],
-        limit=limit,
-        output_fields=["text","chunk_id","source"]
-    )
+# ---------------------- 工具函数 ----------------------
+def get_or_create_thread_id(user_id: Optional[str] = None) -> str:
+    """
+    获取或生成会话 ID（thread_id）
+    - 若提供 user_id，则使用它作为 thread_id（便于跨会话记忆）
+    - 否则生成随机 UUID
+    """
+    if user_id:
+        return f"user_{user_id}"
+    return str(uuid.uuid4())
 
-    return results[0]
+# ---------------------- API 端点 ----------------------
+@app.post("/chat", response_model=dict)
+async def chat(
+    query: str = Form(..., description="用户问题"),
+    user_id: Optional[str] = Form(None, description="用户标识（可选）")
+):
+    """
+    文本问答接口
+    - 用户提交问题，Agent 自动调用工具检索并回答
+    - 支持多轮对话（通过 user_id 维持会话记忆）
+    """
+    logger.info(f"收到聊天请求，user_id={user_id}, query={query}")
+    try:
+        thread_id = get_or_create_thread_id(user_id)
+        answer = run_agent(query, thread_id=thread_id)
+        return JSONResponse({
+            "success": True,
+            "answer": answer,
+            "thread_id": thread_id
+        })
+    except Exception as e:
+        logger.error(f"聊天处理失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"服务器内部错误: {str(e)}")
 
-#生成
-def generate_answer(query : str):
+@app.post("/upload")
+async def upload_invoice(
+    file: UploadFile = File(..., description="发票图片文件"),
+    user_id: Optional[str] = Form(None)
+):
+    """
+    上传发票图片，自动识别并判断抵扣
+    - 保存图片到临时目录，调用 invoice_ocr_tool 处理
+    """
+    logger.info(f"收到图片上传，user_id={user_id}, filename={file.filename}")
+    # 检查文件类型
+    if not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="只支持图片文件")
 
-    # 检索到的数据
-    hits = retrieve(str,limit=5)
+    try:
+        # 保存临时文件
+        temp_dir = Path("temp_uploads")
+        temp_dir.mkdir(exist_ok=True)
+        file_path = temp_dir / f"{uuid.uuid4()}_{file.filename}"
+        with open(file_path, "wb") as f:
+            content = await file.read()
+            f.write(content)
 
-    # 格式化的操作
-    context_blocks = []
-    print("=== 检索结果 ===")
-    for i, hit in enumerate(hits, 1):
-        text = hit["entity"]["text"]
-        source = hit["entity"].get("source", "unknown")
-        chunk_id = hit["entity"].get("chunk_id", "unknown")
-        score = hit["distance"]  # 在 COSINE 模式下，score 越高代表越相似
+        # 构造问题，调用 Agent（直接调用工具）
+        from tools import invoice_ocr_tool
+        result = invoice_ocr_tool(str(file_path))
 
-        print(f"[{i}] chunk_id={chunk_id} score={score:.4f} source={source}")
-        print(text)
-        print()
+        # 清理临时文件（可选）
+        # file_path.unlink(missing_ok=True)
 
-        # 拼接成带有编号和元数据的规范上下文块
-        context_blocks.append(
-            f"[片段{i} | chunk_id={chunk_id} | source={source}]\n{text}"
-        )
+        return JSONResponse({
+            "success": True,
+            "result": result,
+            "thread_id": get_or_create_thread_id(user_id)
+        })
+    except Exception as e:
+        logger.error(f"图片处理失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"图片处理失败: {str(e)}")
 
-    # 将多个上下文片段用换行符连成一个大字符串
-    context = "\n\n".join(context_blocks)
+@app.get("/health")
+async def health_check():
+    """健康检查接口"""
+    return {"status": "ok", "memory": "SQLite" if checkpointer else "memory"}
 
-    # 构造 Prompt
-    user_prompt = f"""问题：
-{query}
+# ---------------------- 命令行交互模式 ----------------------
+def interactive_mode():
+    """命令行交互式问答（支持多轮对话）"""
+    print("=" * 60)
+    print("增值税智能税务助手 (命令行版)")
+    print("输入 'exit' 或 'quit' 退出，输入 'clear' 重置会话")
+    print("=" * 60)
+    thread_id = "cli_session"  # 固定会话 ID，保持连续对话
 
-上下文：
-{context}
-"""
-    # 调用agent
-    result = agent.invoke({
-        "messages" : [{"role": "user","content": user_prompt}],
-    })
+    while True:
+        try:
+            query = input("\n🧾 您的问题: ").strip()
+            if not query:
+                continue
+            if query.lower() in ("exit", "quit"):
+                print("感谢使用，再见！")
+                break
+            if query.lower() == "clear":
+                # 重置记忆（对 SQLite 暂不支持，此处提示）
+                print("⚠️ 目前不支持清空记忆，可重启程序或删除 checkpoints.db")
+                continue
 
-    final_msg = result["messages"][-1]
+            print("🤖 思考中...")
+            answer = run_agent(query, thread_id=thread_id)
+            print("\n" + "=" * 60)
+            print(answer)
+            print("=" * 60)
+        except KeyboardInterrupt:
+            print("\n退出")
+            break
+        except Exception as e:
+            logger.error(f"交互模式异常: {e}", exc_info=True)
+            print(f"⚠️ 出错了: {e}")
 
-    print("====最终回答====")
-    final_msg.pretty_print()
+# ---------------------- 主入口 ----------------------
+def main():
+    """根据命令行参数决定启动模式"""
+    if len(sys.argv) > 1:
+        # 如果有参数，尝试作为问题直接回答（单次问答）
+        query = " ".join(sys.argv[1:])
+        print(f"🧾 问题: {query}")
+        answer = run_agent(query, thread_id="single_shot")
+        print("\n" + "=" * 60)
+        print(answer)
+        print("=" * 60)
+    else:
+        # 无参数则启动交互模式
+        interactive_mode()
 
-q = "个体户是定期定额征收，还需要自己手动申报增值税吗？"
-generate_answer(q)
+if __name__ == "__main__":
+    # 如果直接运行 main.py，且无参数，启动交互模式
+    # 若需要启动 FastAPI 服务，请使用：uvicorn main:app --reload
+    if len(sys.argv) == 1:
+        # 检查是否想启动 API 服务（可通过环境变量或参数控制）
+        # 这里简单处理：无参数启动交互模式
+        main()
+    else:
+        # 有参数时，尝试作为单次问答
+        main()
